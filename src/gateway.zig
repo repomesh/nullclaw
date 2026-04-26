@@ -5432,10 +5432,11 @@ pub fn run(
     // Best-effort probe to detect if the port is already in use.
     // A TOCTOU gap exists between probe and listen(), but listen() will still
     // fail with AddressInUse if another process binds the port in that window.
-    const probe_conn = std_compat.net.tcpConnectToAddress(addr) catch null;
-    if (probe_conn) |conn| {
-        conn.close();
-        return error.AddressInUse;
+    // On Windows, connection refused errors are wrapped as error.Unexpected, so we
+    // use a different approach: try to listen on the port directly.
+    const probe_server = addr.listen(.{ .reuse_address = false }) catch null;
+    if (probe_server) |server| {
+        server.stream.close();
     }
 
     var server = try addr.listen(.{
