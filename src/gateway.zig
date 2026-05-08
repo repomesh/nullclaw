@@ -5327,8 +5327,10 @@ pub fn run(
 
         // In daemon mode (`event_bus` is present), inbound processing is delegated to
         // the bus + channel runtime. However, A2A requires a synchronous session manager
-        // for request-response JSON-RPC, so also init when A2A is enabled.
-        if (needs_local_agent or cfg.a2a.enabled) {
+        // for request-response JSON-RPC, so also init when A2A is enabled. Likewise,
+        // `gateway.webhook_sync_for_workers` opt-in routes paired-token /webhook
+        // requests through the session manager, so init it in that mode too.
+        if (needs_local_agent or cfg.a2a.enabled or cfg.gateway.webhook_sync_for_workers) {
             sec_tracker_opt = security.RateTracker.init(allocator, cfg.autonomy.max_actions_per_hour);
             sec_policy_opt = .{
                 .autonomy = cfg.autonomy.level,
@@ -5741,9 +5743,26 @@ pub fn run(
                             var routing = webhookRouting(req_allocator, b, bearer, config_opt);
                             defer routing.deinit(req_allocator);
 
-                            if (state.event_bus) |eb| {
+                            // Worker-style sync path opt-in: when the request authenticates with
+                            // a token from `paired_tokens` and `gateway.webhook_sync_for_workers`
+                            // is set, take the synchronous session-manager branch instead of the
+                            // event bus. This gives NullBoiler-style orchestrators the
+                            // `{"status":"ok","response":"..."}` response their dispatch contract
+                            // expects (Gap 3 from `docs/integration-analysis.md`). Channel
+                            // webhooks (no paired-token bearer) continue through the bus path
+                            // unchanged.
+                            const sync_for_worker = blk: {
+                                const cfg = config_opt orelse break :blk false;
+                                if (!cfg.gateway.webhook_sync_for_workers) break :blk false;
+                                const guard = pairing_guard orelse break :blk false;
+                                const tok = bearer orelse break :blk false;
+                                break :blk guard.matchesStoredToken(tok);
+                            };
+                            const use_bus = state.event_bus != null and !sync_for_worker;
+
+                            if (use_bus) {
                                 _ = publishToBus(
-                                    eb,
+                                    state.event_bus.?,
                                     state.allocator,
                                     "webhook",
                                     routing.sender_id,
