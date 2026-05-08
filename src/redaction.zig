@@ -1,4 +1,4 @@
-//! Reusable privacy redaction primitive (DG-1).
+//! Reusable privacy redaction primitive.
 //!
 //! Detects and replaces email, phone (international plus-prefixed plus common
 //! US/RU local forms), card numbers (Luhn-checked), anchored ID/passport runs,

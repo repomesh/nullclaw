@@ -1,4 +1,4 @@
-//! Read-only SQLite analytics tool (DG-3).
+//! Read-only SQLite analytics tool.
 //!
 //! Three layers of defense against accidental writes:
 //!   1. Statement classifier — Zig-side allowlist for SELECT / WITH / PRAGMA table_info

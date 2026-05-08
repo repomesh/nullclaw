@@ -1,13 +1,13 @@
-//! Anonymize text tool (DG-6).
+//! Anonymize text tool.
 //!
-//! Thin wrapper around the reusable DG-1 redaction primitive. Lets the agent
-//! anonymize a single piece of free-form text on demand (e.g. before pasting
-//! a user-supplied snippet into a notebook, ticket, or downstream tool).
+//! Thin wrapper around the reusable redaction primitive. Lets the agent
+//! anonymize a single piece of free-form text on demand (e.g. before pasting a
+//! user-supplied snippet into a notebook, ticket, or downstream tool).
 //!
 //! Each invocation uses a fresh Redactor, so placeholder ids (`[EMAIL_1]`,
 //! `[CARD_2]`, ...) restart from 1 and are deterministic within one call.
 //! Cross-call coupling lives intentionally in the agent-wide pre-provider
-//! redactor (DG-2), not here.
+//! redactor, not here.
 //!
 //! The tool never returns the original sensitive substrings on the success
 //! path — only deterministic placeholders.
@@ -20,8 +20,8 @@ const ToolResult = root.ToolResult;
 const JsonObjectMap = root.JsonObjectMap;
 
 /// Hard cap on input size to keep memory bounded on adversarial input.
-/// 256 KiB matches the read-only sqlite_query result cap used by DG-3 and is
-/// plenty for any realistic single-message scrub.
+/// 256 KiB matches the read-only sqlite_query result cap and is plenty for any
+/// realistic single-message scrub.
 const MAX_INPUT_BYTES: usize = 256 * 1024;
 
 pub const AnonymizeTextTool = struct {
@@ -302,12 +302,12 @@ test "anonymize_text: never leaks original sensitive substrings on success" {
     // Negative security test: scan the output for verbatim copies of every
     // sensitive substring we fed in. Anything left intact is a leak.
     //
-    // Categories are separated by newlines on purpose. The DG-1 phone matcher
-    // tolerates spaces/hyphens/parens between digits and is capped at 15
-    // digits, so a layout like `+1202555... 4111 1111 1111 1111` would let
-    // the phone matcher greedily eat the leading digits of the card and
-    // suppress the [CARD_1] match. A non-digit, non-allowed-separator like
-    // '\n' guarantees each detector sees its category in isolation.
+    // Categories are separated by newlines on purpose. The phone matcher
+    // tolerates spaces/hyphens/parens between digits and is capped at 15 digits,
+    // so a layout like `+1202555... 4111 1111 1111 1111` would let the phone
+    // matcher greedily eat the leading digits of the card and suppress the
+    // [CARD_1] match. A non-digit, non-allowed-separator like '\n' guarantees
+    // each detector sees its category in isolation.
     const sensitive = [_][]const u8{
         "user@example.com",
         "+12025551234",

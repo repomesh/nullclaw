@@ -483,7 +483,6 @@ pub fn allTools(
     calt.* = .{};
     try list.append(allocator, calt.tool());
 
-    // DG-3: read-only SQLite analytics tool
     const sqt = try allocator.create(sqlite_query.SqliteQueryTool);
     sqt.* = .{
         .workspace_dir = workspace_dir,
@@ -491,7 +490,6 @@ pub fn allTools(
     };
     try list.append(allocator, sqt.tool());
 
-    // DG-6: anonymize_text tool on top of the DG-1 redaction primitive
     const ant = try allocator.create(anonymize_text.AnonymizeTextTool);
     ant.* = .{};
     try list.append(allocator, ant.tool());
@@ -1483,8 +1481,8 @@ test "every tool from allTools has useful schema semantics" {
 }
 
 test "all tools wires anonymize_text and end-to-end redacts an email" {
-    // DG-6 wiring guard: ensure the tool is registered in the default set
-    // and that calling it through the vtable produces a redacted output.
+    // Ensure the tool is registered in the default set and that calling it
+    // through the vtable produces a redacted output.
     const tools = try allTools(std.testing.allocator, "/tmp/yc_test", .{});
     defer deinitTools(std.testing.allocator, tools);
 

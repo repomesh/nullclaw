@@ -329,10 +329,10 @@ fn summarizeSlice(
         .{ .role = .user, .content = summarizer_user },
     };
 
-    // DG-2: redact PII from compaction summary before sending. The user message
-    // here embeds the full transcript, so this path is the most likely to leak
-    // raw PII into the upstream LLM. Allocations live on `summary_arena` and
-    // are freed at function exit.
+    // Redact PII from compaction summary before sending. The user message here
+    // embeds the full transcript, so this path is the most likely to leak raw
+    // PII into the upstream LLM. Allocations live on `summary_arena` and are
+    // freed at function exit.
     var summary_arena = std.heap.ArenaAllocator.init(allocator);
     defer summary_arena.deinit();
     const messages_slice: []ChatMessage = if (redactor) |r|
@@ -1077,10 +1077,8 @@ test "buildCompactionTranscript keeps UTF-8 valid when truncating long message c
     try std.testing.expect(std.mem.indexOf(u8, transcript, "tail") == null);
 }
 
-// DG-2: Compaction-level redaction coverage. Round-2 review found that
-// `summarizeSlice` was a third `provider.chat` site bypassing the main hook;
-// the fix wires `redactor` through. This test guards against accidental
-// regression — drop the redactor arg and the assert fires.
+// Compaction-level redaction coverage. `summarizeSlice` is a separate
+// `provider.chat` site, so this test guards against accidental regression.
 test "autoCompactHistory redacts PII before sending to summarizer" {
     const SummaryCaptureProvider = struct {
         const Self = @This();

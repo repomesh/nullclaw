@@ -270,11 +270,11 @@ pub const Agent = struct {
     response_cache: ?*cache.ResponseCache = null,
     /// Optional MemoryRuntime pointer for diagnostics (e.g. /doctor command).
     mem_rt: ?*memory_mod.MemoryRuntime = null,
-    /// DG-2: optional per-conversation Redactor for PII scrubbing before
-    /// outbound provider calls. Heap-allocated when `enable_pii_redaction`
-    /// is true on the active agent profile (default true). State (counters,
-    /// maps) lives on `self.allocator`; redacted slices for each turn are
-    /// allocated on the per-turn arena.
+    /// Optional per-conversation Redactor for PII scrubbing before outbound
+    /// provider calls. Heap-allocated when `enable_pii_redaction` is true on
+    /// the active agent profile (default true). State (counters, maps) lives
+    /// on `self.allocator`; redacted slices for each turn are allocated on the
+    /// per-turn arena.
     redactor: ?*redaction.Redactor = null,
     /// Optional session scope for memory read/write operations.
     memory_session_id: ?[]const u8 = null,
@@ -556,7 +556,7 @@ pub const Agent = struct {
         };
         errdefer if (bootstrap_provider) |bp| bp.deinit();
 
-        // DG-2: per-conversation PII redactor (default-on, can be disabled per agent profile).
+        // Per-conversation PII redactor (default-on, can be disabled per agent profile).
         const redactor_ptr: ?*redaction.Redactor = blk: {
             const enabled = if (profile) |p| p.enable_pii_redaction else cfg.agent.enable_pii_redaction;
             if (!enabled) break :blk null;
@@ -566,9 +566,8 @@ pub const Agent = struct {
             r.* = redaction.Redactor.init(allocator, .{});
             break :blk r;
         };
-        // Outer errdefer fires if any future fallible op is added between this block
-        // and the return statement. Currently no such op exists, but the cost of
-        // defensive coverage is one branch — see DG-2 review.
+        // Outer errdefer fires if any future fallible op is added between this
+        // block and the return statement.
         errdefer if (redactor_ptr) |r| {
             r.deinit();
             allocator.destroy(r);
@@ -2712,9 +2711,9 @@ pub const Agent = struct {
         defer self.allocator.free(summary_messages);
         const summary_max_tokens = self.effectiveMaxTokensForMessages(summary_messages, false);
 
-        // DG-2: also redact the iteration-limit summary call. This is a separate
+        // Also redact the iteration-limit summary call. This is a separate
         // build path from `buildProviderMessagesForTurn`, so the main hook does
-        // not cover it; without this, max-iterations would leak unredacted PII.
+        // not cover it.
         var summary_arena = std.heap.ArenaAllocator.init(self.allocator);
         defer summary_arena.deinit();
         const send_summary_messages: []ChatMessage = if (self.redactor) |r|
@@ -3512,9 +3511,9 @@ pub const Agent = struct {
             break :blk messages;
         };
 
-        // DG-2: optional pre-provider PII redaction. Same Redactor instance is
-        // reused across turns so a given email/card maps to the same placeholder
-        // id throughout the conversation. The redacted slices live on `arena`
+        // Optional pre-provider PII redaction. Same Redactor instance is reused
+        // across turns so a given email/card maps to the same placeholder id
+        // throughout the conversation. The redacted slices live on `arena`
         // (per-turn), while Redactor state stays on `self.allocator`.
         if (self.redactor) |r| {
             return try redactMessagesForProvider(arena, raw, r);
@@ -10467,7 +10466,7 @@ test "loop honors max_tool_iterations limit" {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// DG-2: Pre-provider PII redaction tests
+// Pre-provider PII redaction tests
 // ═══════════════════════════════════════════════════════════════════════════
 
 const RedactCaptureProvider = struct {
@@ -10934,7 +10933,7 @@ test "Agent.redactMessagesForProvider redacts multimodal text and image URLs" {
     try std.testing.expect(std.mem.indexOf(u8, out_parts[1].image_url.url, "[EMAIL_2]") != null);
 }
 
-// ---- DG-2 Test 6: iteration-exhausted summary path ----
+// ---- iteration-exhausted summary path ----
 
 test "Agent: redactor scrubs PII in iteration-exhausted summary call" {
     // Regression: round-1 review fixed a leak where the summary call (when
@@ -10943,8 +10942,8 @@ test "Agent: redactor scrubs PII in iteration-exhausted summary call" {
 
     const NoopIterTool = struct {
         const Self = @This();
-        pub const tool_name = "noop_iter_dg2";
-        pub const tool_description = "noop for DG-2 iteration cap test";
+        pub const tool_name = "noop_iter_redaction";
+        pub const tool_description = "noop for redaction iteration cap test";
         pub const tool_params = "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
         pub const vtable = tools_mod.ToolVTable(Self);
 
@@ -10987,8 +10986,8 @@ test "Agent: redactor scrubs PII in iteration-exhausted summary call" {
             if (self.calls <= self.cap) {
                 const tool_calls = try allocator.alloc(providers.ToolCall, 1);
                 tool_calls[0] = .{
-                    .id = try allocator.dupe(u8, "call-noop-iter-dg2"),
-                    .name = try allocator.dupe(u8, "noop_iter_dg2"),
+                    .id = try allocator.dupe(u8, "call-noop-iter-redaction"),
+                    .name = try allocator.dupe(u8, "noop_iter_redaction"),
                     .arguments = try allocator.dupe(u8, "{}"),
                 };
                 return .{
@@ -11080,7 +11079,7 @@ test "Agent: redactor scrubs PII in iteration-exhausted summary call" {
     try std.testing.expect(std.mem.indexOf(u8, captured, "[EMAIL_1]") != null);
 }
 
-// ---- DG-2 Test 7: streaming path ----
+// ---- streaming path ----
 
 test "Agent: redactor scrubs PII before provider.streamChat" {
     // Regression: streamChat path must apply the same hook as chat. The hook
@@ -11203,7 +11202,7 @@ test "Agent: redactor scrubs PII before provider.streamChat" {
     try std.testing.expect(std.mem.indexOf(u8, captured, "user@example.com") == null);
 }
 
-// ---- DG-2 Test 8: system prompt with PII ----
+// ---- system prompt with PII ----
 
 test "Agent: redactor scrubs PII in system prompt" {
     // Regression: redaction must apply to ALL roles, including system. System
