@@ -6,6 +6,7 @@ VERSION ?= dev
 PROFILE ?= gateway
 SERVICE ?= gateway
 RUN_ARGS ?=
+CONFIG_ARGS ?= --interactive
 COMPOSE_BAKE ?= true
 NULLCLAW_PORT ?= 3210
 
@@ -15,7 +16,7 @@ export NULLCLAW_DOCKER_TARGET := $(DOCKER_TARGET)
 export NULLCLAW_VERSION := $(VERSION)
 export NULLCLAW_PORT
 
-.PHONY: build up down run shell logs check-buildx
+.PHONY: build config up down run shell logs check-buildx
 
 check-buildx:
 	$(BUILDX) version >/dev/null
@@ -23,7 +24,10 @@ check-buildx:
 build: check-buildx
 	$(COMPOSE) --profile $(PROFILE) build $(SERVICE)
 
-up: check-buildx
+config: check-buildx
+	$(COMPOSE) --profile agent run --rm agent onboard $(CONFIG_ARGS)
+
+up: check-buildx config
 	$(COMPOSE) --profile $(PROFILE) up -d --build $(SERVICE)
 
 down:
