@@ -887,9 +887,6 @@ pub const Agent = struct {
             "i will attempt",
             "let me attempt",
             // check / look / verify
-            "i'll check",
-            "i will check",
-            "let me check",
             "i'll look into",
             "i will look into",
             "let me look into",
@@ -899,6 +896,9 @@ pub const Agent = struct {
             "i'll verify",
             "i will verify",
             "let me verify",
+            "i'll check",
+            "i will check",
+            "let me check",
             // fetch / get / retrieve
             "i'll fetch",
             "i will fetch",
@@ -925,6 +925,14 @@ pub const Agent = struct {
             "i'll search",
             "i will search",
             "let me search",
+            "i'll perform a search",
+            "i will perform a search",
+            "let me perform a search",
+            "give me a moment",
+            "give me a second",
+            "one moment",
+            "searching...",
+            "checking the web",
             // read / open / load
             "i'll read",
             "i will read",
@@ -978,10 +986,57 @@ pub const Agent = struct {
             "Сейчас перепроверю",
             "попробую ещё раз",
             "Попробую ещё раз",
+            "сейчас поищу",
+            "Сейчас поищу",
+            "выполню поиск",
+            "Выполню поиск",
+            "сейчас найду",
+            "Сейчас найду",
+            "дай мне минуту",
+            "Дай мне минуту",
+            "дайте мне минуту",
+            "Дайте мне минуту",
+            "дай мне минутку",
+            "Дай мне минутку",
+            "дайте мне минутку",
+            "Дайте мне минутку",
+            "минуту",
+            "Минуту",
+            "минутку",
+            "Минутку",
+            "одну минуту",
+            "Одну минуту",
+            "одну минутку",
+            "Одну минутку",
+            "подожди",
+            "Подожди",
+            "подождите",
+            "Подождите",
+            "один момент",
+            "Один момент",
+            "секунду",
+            "Секунду",
+            "секундку",
+            "Секундку",
+            "посмотрю в интернете",
+            "Посмотрю в интернете",
+            "проверю информацию",
+            "Проверю информацию",
+            "сейчас проверю",
+            "Сейчас проверю",
+            "проведу поиск",
+            "Проведу поиск",
+            "выполню поиск",
+            "Выполню поиск",
+            "начинаю поиск",
+            "Начинаю поиск",
+            "поищу информацию",
+            "Поищу информацию",
         };
         inline for (exact_patterns) |pattern| {
             if (std.mem.indexOf(u8, text, pattern) != null) return true;
         }
+
         return false;
     }
 
@@ -2386,7 +2441,7 @@ pub const Agent = struct {
                     if (empty_response_retry_count < 1 and
                         iteration + 1 < self.max_tool_iterations)
                     {
-                        try self.appendOwnedHistoryMessage(.{ .role = .user, .content = try self.allocator.dupe(u8, "SYSTEM: Your previous reply was empty. Respond with a direct user-visible answer or emit the necessary tool call(s). Do not return an empty response.") });
+                        try self.appendOwnedHistoryMessage(.{ .role = .user, .content = try self.allocator.dupe(u8, "SYSTEM: Your previous reply was empty. Respond with a direct user-visible answer or emit the necessary tool call(s). Do not return an empty response. - If the user asks for information from the internet, web, or external sources (for example: recipes, news, latest documentation), you SHOULD use the `web_search` tool immediately.\n- Do not merely state that you can find the information; execute the tool call in the same turn.\n- NEVER respond with just 'I will search' or 'Let me check' without actually calling the tool in the same response.\n- If the user's intent implies a need for fresh data or external verification, default to using `web_search`.\n\n") });
                         self.trimHistory();
                         empty_response_retry_count += 1;
                         continue;
