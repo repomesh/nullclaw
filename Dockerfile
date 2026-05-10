@@ -6,7 +6,7 @@ FROM --platform=$BUILDPLATFORM alpine:3.23 AS builder
 
 ARG ZIG_VERSION=0.16.0
 
-RUN apk add --no-cache bash curl musl-dev python3
+RUN apk add --no-cache bash curl git musl-dev python3
 
 WORKDIR /app
 COPY .github/scripts/install-zig.sh .github/scripts/install-zig.sh
@@ -15,10 +15,30 @@ COPY src/ src/
 COPY vendor/sqlite3/ vendor/sqlite3/
 
 RUN set -eu; \
+    fetch_vendor_dep() { \
+      repo="$1"; \
+      commit="$2"; \
+      target="vendor/${repo}"; \
+      tmp_dir="$(mktemp -d)"; \
+      archive_path="${tmp_dir}/${repo}.tar.gz"; \
+      curl -fsSL "https://github.com/nullclaw/${repo}/archive/${commit}.tar.gz" -o "${archive_path}"; \
+      tar -xzf "${archive_path}" -C "${tmp_dir}"; \
+      extracted_dir="$(find "${tmp_dir}" -mindepth 1 -maxdepth 1 -type d | head -n 1)"; \
+      rm -rf "${target}"; \
+      mkdir -p "${target}"; \
+      cp -a "${extracted_dir}/." "${target}/"; \
+      rm -rf "${tmp_dir}"; \
+    }; \
+    fetch_vendor_dep websocket 9151f70b27024a072ea04425b9e7609eb6b1386c; \
+    fetch_vendor_dep wasm3 8a29b0080f1f65dbbe8b8f8c4d8148480feff377; \
+    sed -i '/\.websocket = .{/,/        },/c\        .websocket = .{\n            .path = "vendor/websocket",\n        },' build.zig.zon; \
+    sed -i '/\.wasm3 = .{/,/        },/c\        .wasm3 = .{\n            .path = "vendor/wasm3",\n        },' build.zig.zon
+
+RUN set -eu; \
     mkdir -p /tmp/zig-path; \
     GITHUB_PATH=/tmp/zig-path/path RUNNER_TEMP=/opt bash .github/scripts/install-zig.sh "${ZIG_VERSION}"; \
     ln -sf "$(cat /tmp/zig-path/path)/zig" /usr/local/bin/zig; \
-    zig version
+    test "$(zig version)" = "0.16.0"
 
 ARG TARGETARCH
 ARG VERSION=dev
@@ -93,7 +113,7 @@ ENTRYPOINT ["nullclaw"]
 CMD ["gateway", "--port", "3000", "--host", "::"]
 
 # Optional autonomous mode (explicit opt-in):
-#   docker build --target release-root -t nullclaw:root .
+#   make build DOCKER_TARGET=release-root IMAGE=nullclaw:root
 FROM release-base AS release-root
 USER 0:0
 

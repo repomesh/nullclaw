@@ -1,6 +1,15 @@
+x-nullclaw-build: &nullclaw-build
+  context: .
+  dockerfile: Dockerfile
+  target: ${NULLCLAW_DOCKER_TARGET:-release}
+  args:
+    ZIG_VERSION: "0.16.0"
+    VERSION: ${NULLCLAW_VERSION:-dev}
+
 services:
   agent:
-    image: ${NULLCLAW_IMAGE:-ghcr.io/nullclaw/nullclaw:latest}
+    image: ${NULLCLAW_IMAGE:-nullclaw:local}
+    build: *nullclaw-build
     profiles: ["agent"]
     stdin_open: true
     tty: true
@@ -13,7 +22,8 @@ services:
     restart: unless-stopped
 
   gateway:
-    image: ${NULLCLAW_IMAGE:-ghcr.io/nullclaw/nullclaw:latest}
+    image: ${NULLCLAW_IMAGE:-nullclaw:local}
+    build: *nullclaw-build
     profiles: ["gateway"]
     command: ["gateway", "--port", "3000", "--host", "::"]
     ports:
