@@ -572,6 +572,29 @@ test "windows localhost fallback helper is scoped" {
     try std.testing.expect(!shouldUseWindowsLocalhostFallback("token-plan-cn.xiaomimimo.com"));
 }
 
+// Regression: Windows getAddressList previously returned UnknownHostName for
+// every non-localhost hostname because the fallback branch short-circuited the
+// entire function.  Verify that a well-known public hostname resolves to at
+// least one address on all platforms.
+test "compat net getAddressList resolves external hostname" {
+    // Sandbox / CI environments without DNS access may legitimately fail; the
+    // critical invariant is that the code does NOT unconditionally reject
+    // non-localhost names with UnknownHostName.
+    const list = getAddressList(std.testing.allocator, "example.com", 443) catch |err| {
+        // If DNS is simply unavailable in this environment, skip.
+        if (err == error.TemporaryNameServerFailure or
+            err == error.NameServerFailure or
+            err == error.SystemResources or
+            err == error.Unexpected)
+            return;
+        // Any other error — especially UnknownHostName on a live system — is a
+        // regression.
+        return err;
+    };
+    defer list.deinit();
+    try std.testing.expect(list.addrs.len > 0);
+}
+
 test "compat net normalizes listener and stream blocking mode" {
     if (builtin.os.tag == .windows or builtin.os.tag == .wasi) return;
 
