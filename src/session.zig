@@ -24,6 +24,7 @@ const providers = @import("providers/root.zig");
 const Provider = providers.Provider;
 const memory_mod = @import("memory/root.zig");
 const Memory = memory_mod.Memory;
+const governance = @import("governance.zig");
 const redaction = @import("redaction.zig");
 const util = @import("util.zig");
 const onboard = @import("onboard.zig");
@@ -1545,7 +1546,14 @@ pub const SessionManager = struct {
         streaming.forwardProviderChunk(adapter.sink, chunk);
     }
 
-    fn shouldSuppressLiveForRedaction(redactor: ?*redaction.Redactor, content: []const u8) bool {
+    fn shouldRehydrateDisplay(session_key: []const u8, conversation_context: ?ConversationContext) bool {
+        const channel = if (conversation_context) |ctx| ctx.channel else null;
+        const is_group = if (conversation_context) |ctx| ctx.is_group else null;
+        return governance.shouldRehydrateDisplay(session_key, channel, is_group);
+    }
+
+    fn shouldSuppressLiveForRedaction(redactor: ?*redaction.Redactor, content: []const u8, display_rehydrate_allowed: bool) bool {
+        if (!display_rehydrate_allowed) return false;
         const r = redactor orelse return false;
         return r.wouldRehydrate() or (r.config.record_originals and r.wouldRedact(content));
     }
@@ -1828,9 +1836,11 @@ pub const SessionManager = struct {
             session.agent.stream_ctx = prev_stream_ctx;
         }
 
+        const display_rehydrate_allowed = shouldRehydrateDisplay(session_key, conversation_context);
+
         var stream_adapter: StreamAdapterCtx = undefined;
         if (stream_sink) |sink| {
-            const suppress_live = shouldSuppressLiveForRedaction(session.agent.redactor, content);
+            const suppress_live = shouldSuppressLiveForRedaction(session.agent.redactor, content, display_rehydrate_allowed);
             stream_adapter = .{ .sink = sink, .suppress_live = suppress_live };
             session.agent.stream_callback = streamChunkForwarder;
             session.agent.stream_ctx = @ptrCast(&stream_adapter);
@@ -1944,11 +1954,13 @@ pub const SessionManager = struct {
             );
         }
 
-        if (session.agent.redactor) |r| {
-            if (r.wouldRehydrate()) {
-                const display_response = try r.unredact(self.allocator, response);
-                self.allocator.free(response);
-                return display_response;
+        if (display_rehydrate_allowed) {
+            if (session.agent.redactor) |r| {
+                if (r.wouldRehydrate()) {
+                    const display_response = try r.unredact(self.allocator, response);
+                    self.allocator.free(response);
+                    return display_response;
+                }
             }
         }
 
@@ -4226,6 +4238,56 @@ test "processMessageStreaming suppresses redacted chunks and returns display res
     }
     try testing.expect(std.mem.indexOf(u8, detailed[0].content, "[EMAIL_1]") != null);
     try testing.expect(std.mem.indexOf(u8, detailed[1].content, "[EMAIL_1]") != null);
+}
+
+test "processMessageStreaming does not rehydrate placeholders for group sessions" {
+    var mock = MockStreamingProvider{ .response = "sent to [EMAIL_1]" };
+    const cfg = testConfig();
+
+    var sqlite_mem = try memory_mod.SqliteMemory.init(testing.allocator, ":memory:");
+    defer sqlite_mem.deinit();
+
+    var noop = observability.NoopObserver{};
+    var sm = SessionManager.init(
+        testing.allocator,
+        &cfg,
+        mock.provider(),
+        &.{},
+        sqlite_mem.memory(),
+        noop.observer(),
+        sqlite_mem.sessionStore(),
+        null,
+    );
+    defer sm.deinit();
+
+    var collector = DeltaCollector{ .allocator = testing.allocator };
+    defer collector.deinit();
+
+    const session_key = "telegram:main:group:-1001";
+    const resp = try sm.processMessageStreaming(
+        session_key,
+        "please email alice@example.com",
+        .{
+            .channel = "telegram",
+            .is_group = true,
+        },
+        .{
+            .callback = DeltaCollector.onEvent,
+            .ctx = @ptrCast(&collector),
+        },
+        null,
+    );
+    defer testing.allocator.free(resp);
+
+    try testing.expectEqualStrings("sent to [EMAIL_1]", resp);
+    try testing.expectEqualStrings("sent to [EMAIL_1]", collector.data.items);
+
+    const detailed = try sqlite_mem.sessionStore().loadMessagesDetailed(testing.allocator, session_key, 10, 0);
+    defer memory_mod.freeDetailedMessages(testing.allocator, detailed);
+    try testing.expectEqual(@as(usize, 2), detailed.len);
+    for (detailed) |message| {
+        try testing.expect(std.mem.indexOf(u8, message.content, "alice@example.com") == null);
+    }
 }
 
 test "processMessageStreaming forwards tool progress hints" {

@@ -39,7 +39,7 @@ pub const SqliteQueryTool = struct {
         "Returns a PII-redacted JSON object {columns, rows, row_count, truncated}. " ++
         "Bounded by max_rows and an internal byte cap. Multi-statement input is rejected.";
     pub const tool_params =
-        \\{"type":"object","properties":{"db_path":{"type":"string","description":"Workspace-relative path to the .db file."},"query":{"type":"string","description":"Single SELECT/WITH/PRAGMA table_info statement (no semicolons mid-stream)."},"max_rows":{"type":"integer","description":"Optional row cap (1..1000). Default: 1000."},"include_sensitive":{"type":"boolean","description":"Return raw sensitive values instead of redacted placeholders. Default: false."}},"required":["db_path","query"]}
+        \\{"type":"object","properties":{"db_path":{"type":"string","description":"Workspace-relative path to the .db file."},"query":{"type":"string","description":"Single SELECT/WITH/PRAGMA table_info statement (no semicolons mid-stream)."},"max_rows":{"type":"integer","description":"Optional row cap (1..1000). Default: 1000."}},"required":["db_path","query"]}
     ;
 
     pub const vtable = root.ToolVTable(@This());
@@ -70,7 +70,9 @@ pub const SqliteQueryTool = struct {
             }
             break :blk self.max_result_rows;
         };
-        const include_sensitive = root.getBool(args, "include_sensitive") orelse false;
+        if (root.getBool(args, "include_sensitive") orelse false) {
+            return failOwned(allocator, "include_sensitive is not available in the agent sqlite_query tool");
+        }
 
         // Layer 1a: path safety (rejects absolute, traversal, null bytes).
         //
@@ -136,7 +138,7 @@ pub const SqliteQueryTool = struct {
             return failOwned(allocator, "statement is not read-only (sqlite3_stmt_readonly check)");
         }
 
-        return try renderRows(allocator, stmt.?, max_rows, self.max_result_bytes, include_sensitive);
+        return try renderRows(allocator, stmt.?, max_rows, self.max_result_bytes);
     }
 };
 
@@ -272,7 +274,6 @@ fn renderRows(
     stmt: *c.sqlite3_stmt,
     max_rows: u32,
     max_bytes: usize,
-    include_sensitive: bool,
 ) !ToolResult {
     const col_count: usize = @intCast(c.sqlite3_column_count(stmt));
     const row_budget = if (max_bytes > RESULT_FOOTER_RESERVE) max_bytes - RESULT_FOOTER_RESERVE else max_bytes;
@@ -392,9 +393,6 @@ fn renderRows(
     try appendBoundedByte(allocator, &out, max_bytes, '}');
 
     const rendered = try out.toOwnedSlice(allocator);
-    if (include_sensitive) {
-        return ToolResult{ .success = true, .output = rendered };
-    }
     var r = redaction.Redactor.init(allocator, .{});
     defer r.deinit();
     const redacted = try r.redact(allocator, rendered);
@@ -794,7 +792,7 @@ test "sqlite_query: redacts sensitive result values by default" {
     try std.testing.expect(std.mem.indexOf(u8, result.output, "[TOKEN_1]") != null);
 }
 
-test "sqlite_query: include_sensitive returns raw result values" {
+test "sqlite_query: include_sensitive is rejected in agent tool context" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     const ws_path = try @import("compat").fs.Dir.wrap(tmp.dir).realpathAlloc(std.testing.allocator, ".");
@@ -810,10 +808,9 @@ test "sqlite_query: include_sensitive returns raw result values" {
     const result = try t.execute(std.testing.allocator, parsed.value.object);
     defer std.testing.allocator.free(result.output);
 
-    try std.testing.expect(result.success);
-    try std.testing.expect(std.mem.indexOf(u8, result.output, "alice@example.com") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.output, "4111 1111 1111 1111") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result.output, "sk-live-secret") != null);
+    try std.testing.expect(!result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "include_sensitive is not available") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "alice@example.com") == null);
 }
 
 test "sqlite_query: invalid db_path (traversal) rejected" {
@@ -893,7 +890,7 @@ test "sqlite_query: tool metadata sanity" {
     try std.testing.expect(t.parametersJson().len > 0);
     try std.testing.expect(std.mem.indexOf(u8, t.parametersJson(), "db_path") != null);
     try std.testing.expect(std.mem.indexOf(u8, t.parametersJson(), "query") != null);
-    try std.testing.expect(std.mem.indexOf(u8, t.parametersJson(), "include_sensitive") != null);
+    try std.testing.expect(std.mem.indexOf(u8, t.parametersJson(), "include_sensitive") == null);
 }
 
 test "classifyStatement: rejects empty" {

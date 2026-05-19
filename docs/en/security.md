@@ -45,11 +45,12 @@ and vector embedding sync.
 The reusable redactor defaults to one-way operation: it keys values by
 HMAC-SHA256 fingerprints and does not retain the original plaintext. The agent
 uses an opt-in in-memory reverse map for its per-conversation redactor so it can
-rehydrate placeholders for user-facing display. Tool arguments keep literal
-placeholders by default; this prevents provider output from becoming a
-provider-to-tool exfiltration channel. The reverse map lives only in process
-RAM, is bounded, is reset with the conversation, and is not written to memory,
-history, JSONL export, or diagnostics.
+rehydrate placeholders for same-principal, single-user display paths. Shared
+channel, group, and thread sessions keep placeholders in the outbound response.
+Tool arguments keep literal placeholders by default; this prevents provider
+output from becoming a provider-to-tool exfiltration channel. The reverse map
+lives only in process RAM, is bounded, is reset with the conversation, and is
+not written to memory, history, JSONL export, or diagnostics.
 
 The redactor is a lightweight text scanner, not a full DLP/OCR engine. It covers
 common text forms for emails, phone numbers, Luhn-valid cards, anchored
@@ -76,6 +77,9 @@ the agent for one-off text snippets. It accepts a required `text` field and
 optional `redact_email`, `redact_phone`, `redact_card`, `redact_id`, and
 `redact_tokens` booleans. All categories are enabled by default; explicitly
 disabled categories pass through unchanged.
+
+The model-facing `sqlite_query` tool always returns redacted results. Raw
+sensitive SQLite output is not exposed through the agent tool schema.
 
 Each call uses a fresh one-way redactor, so placeholder counters restart from
 `[EMAIL_1]` / `[PHONE_1]` inside that call and no plaintext reverse map is kept
