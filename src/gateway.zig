@@ -5375,6 +5375,21 @@ fn nextAcceptSleepMs(previous_sleep_ms: u64, err: anyerror) u64 {
     return @min(base * 2, ACCEPT_ERROR_BACKOFF_MAX_MS);
 }
 
+fn probeGatewayAddressAvailable(addr: std_compat.net.Address) !void {
+    if (comptime builtin.os.tag == .windows) {
+        var probe_server: ?std_compat.net.Server = addr.listen(.{ .reuse_address = false }) catch |err| switch (err) {
+            error.AddressInUse => return error.AddressInUse,
+            else => null,
+        };
+        if (probe_server) |*server| server.deinit();
+        return;
+    }
+
+    const probe_conn = std_compat.net.tcpConnectToAddress(addr) catch return;
+    probe_conn.close();
+    return error.AddressInUse;
+}
+
 /// Run the HTTP gateway. Binds to host:port and serves HTTP requests.
 /// Endpoints: GET /health, GET /ready, GET /status, GET /doctor, POST /pair, POST /logout, POST /webhook, GET|POST /whatsapp, POST /telegram, POST /slack/events, POST /line, POST /lark, GET|POST /wechat, GET|POST /wecom, POST /qq, POST /max
 /// If config_ptr is null, loads config internally (for backward compatibility).
@@ -5520,12 +5535,7 @@ pub fn run(
     // Best-effort probe to detect if the port is already in use.
     // A TOCTOU gap exists between probe and listen(), but listen() will still
     // fail with AddressInUse if another process binds the port in that window.
-    // On Windows, connection refused errors are wrapped as error.Unexpected, so we
-    // use a different approach: try to listen on the port directly.
-    const probe_server = addr.listen(.{ .reuse_address = false }) catch null;
-    if (probe_server) |server| {
-        server.stream.close();
-    }
+    try probeGatewayAddressAvailable(addr);
 
     var server = try addr.listen(.{
         .reuse_address = true,
@@ -9937,6 +9947,16 @@ test "jsonWrapChallenge escapes malicious challenge value" {
 }
 
 // ── Port conflict detection tests ─────────────────────────────────────
+
+test "probeGatewayAddressAvailable returns AddressInUse when port is bound" {
+    const test_addr = try std_compat.net.Address.resolveIp("127.0.0.1", 0);
+    var listener = try test_addr.listen(.{ .reuse_address = true });
+    defer listener.deinit();
+
+    // Regression: the gateway probe must not silently treat an active listener
+    // as available before the final listen call.
+    try std.testing.expectError(error.AddressInUse, probeGatewayAddressAvailable(listener.listen_address));
+}
 
 test "run returns AddressInUse when port is already bound" {
     // Find an available port by binding to port 0
