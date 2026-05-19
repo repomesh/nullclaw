@@ -12,8 +12,8 @@ const std_compat = @import("compat");
 const build_options = @import("build_options");
 const config_types = @import("../config_types.zig");
 const fs_compat = @import("../fs_compat.zig");
+const governance = @import("../governance.zig");
 const provider_api_key = @import("../providers/api_key.zig");
-const redaction = @import("../redaction.zig");
 const log = std.log.scoped(.memory);
 
 // engines/ (Layer A: Primary Store)
@@ -724,7 +724,7 @@ pub const MemoryRuntime = struct {
 
         var reindexed: u32 = 0;
         for (entries) |entry| {
-            const safe_content = redactForEmbedding(allocator, entry.content) catch |err| {
+            const safe_content = governance.redactForEmbedding(allocator, entry.content) catch |err| {
                 log.warn("reindex: redaction failed for key '{s}': {}", .{ entry.key, err });
                 continue;
             };
@@ -829,12 +829,6 @@ const HygienePreserveSyncCtx = struct {
     circuit_breaker: ?*circuit_breaker.CircuitBreaker = null,
 };
 
-fn redactForEmbedding(allocator: std.mem.Allocator, content: []const u8) ![]u8 {
-    var r = redaction.Redactor.init(allocator, .{});
-    defer r.deinit();
-    return r.redact(allocator, content);
-}
-
 fn syncVectorUpsertWithComponents(
     allocator: std.mem.Allocator,
     key: []const u8,
@@ -864,7 +858,7 @@ fn syncVectorUpsertWithComponents(
         if (!cb.allow()) return;
     }
 
-    const safe_content = redactForEmbedding(allocator, content) catch |err| {
+    const safe_content = governance.redactForEmbedding(allocator, content) catch |err| {
         log.warn("{s}vector sync redaction failed for key '{s}': {}", .{ log_prefix, encoded_key, err });
         if (circuit_breaker_inst) |cb| cb.recordFailure();
         return;

@@ -5,6 +5,7 @@
 //! boundaries can share the same trust rules without importing each other.
 
 const std = @import("std");
+const redaction = @import("redaction.zig");
 
 pub const DisplayTrustScope = enum {
     local_single_user,
@@ -51,6 +52,12 @@ pub fn shouldRehydrateDisplay(session_key: []const u8, channel: ?[]const u8, is_
     return displayTrustScope(session_key, channel, is_group) == .local_single_user;
 }
 
+pub fn redactForEmbedding(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var r = redaction.Redactor.init(allocator, .{});
+    defer r.deinit();
+    return r.redact(allocator, text);
+}
+
 test "displayTrustScope treats cli and direct sessions as single-user" {
     try std.testing.expectEqual(
         DisplayTrustScope.local_single_user,
@@ -83,4 +90,15 @@ test "displayTrustScope treats shared sessions as shared even when channel is pr
         DisplayTrustScope.shared_channel,
         displayTrustScope("telegram:main:12345", "telegram", true),
     );
+}
+
+test "redactForEmbedding applies shared embedding-boundary policy" {
+    const allocator = std.testing.allocator;
+    const safe = try redactForEmbedding(allocator, "reach me at user@example.com with sk-test-secret-token");
+    defer allocator.free(safe);
+
+    try std.testing.expect(std.mem.indexOf(u8, safe, "user@example.com") == null);
+    try std.testing.expect(std.mem.indexOf(u8, safe, "sk-test-secret-token") == null);
+    try std.testing.expect(std.mem.indexOf(u8, safe, "[EMAIL_1]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, safe, "[TOKEN_1]") != null);
 }

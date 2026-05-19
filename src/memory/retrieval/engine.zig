@@ -13,6 +13,7 @@ const Memory = root.Memory;
 const MemoryEntry = root.MemoryEntry;
 const MemoryCategory = root.MemoryCategory;
 const config_types = @import("../../config_types.zig");
+const governance = @import("../../governance.zig");
 const rrf = @import("rrf.zig");
 const key_codec = @import("../vector/key_codec.zig");
 const vector_store_mod = @import("../vector/store.zig");
@@ -24,7 +25,6 @@ const query_expansion_mod = @import("query_expansion.zig");
 const adaptive_mod = @import("adaptive.zig");
 const llm_reranker_mod = @import("llm_reranker.zig");
 const sqlite_mod = if (build_options.enable_sqlite) @import("../engines/sqlite.zig") else @import("../engines/sqlite_disabled.zig");
-const redaction = @import("../../redaction.zig");
 const log = std.log.scoped(.retrieval);
 
 // ── Pipeline stage ordering ──────────────────────────────────────
@@ -51,12 +51,6 @@ pub const RetrievalStage = enum {
     /// Stage 8: Final limit/truncation
     limit,
 };
-
-fn redactForEmbedding(allocator: Allocator, text: []const u8) ![]u8 {
-    var r = redaction.Redactor.init(allocator, .{});
-    defer r.deinit();
-    return r.redact(allocator, text);
-}
 
 /// The canonical pipeline order. All stages execute in this sequence.
 pub const pipeline_order = [_]RetrievalStage{
@@ -441,7 +435,7 @@ pub const RetrievalEngine = struct {
                 }
             }
 
-            const safe_query = redactForEmbedding(allocator, query) catch |err| {
+            const safe_query = governance.redactForEmbedding(allocator, query) catch |err| {
                 log.warn("query redaction failed, skipping vector search: {}", .{err});
                 break :hybrid_blk;
             };
