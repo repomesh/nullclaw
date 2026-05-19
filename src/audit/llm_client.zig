@@ -1,9 +1,8 @@
-//! Envelope-triage call wrapping the project's existing provider abstraction.
+//! Envelope-triage call over the project's existing provider abstraction.
 //!
-//! Reuses src/providers/ — the same code paths the agent uses for any of:
-//! anthropic, openai, openrouter, ollama, gemini, vertex, custom OpenAI-
-//! compatible. We never speak HTTP directly here; we delegate to
-//! the provider vtable/factory and parse the returned text as a Verdict.
+//! This module does not construct providers. Callers pass the same provider
+//! vtable interface the agent uses, and this layer only owns the triage prompt
+//! plus verdict parsing.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -41,13 +40,6 @@ pub const Verdict = struct {
     }
 };
 
-pub const TriageProvider = struct {
-    name: []const u8,
-    model: []const u8,
-    api_key: ?[]const u8,
-    temperature: f64 = 0.0,
-};
-
 const SYSTEM_PROMPT =
     \\You are a security analyst triaging potential secret leaks.
     \\You receive a privacy-preserving JSON envelope describing a candidate
@@ -76,37 +68,22 @@ const SYSTEM_PROMPT =
 /// Caller owns the returned Verdict and must call deinit on it.
 pub fn triageEnvelope(
     allocator: Allocator,
-    provider: TriageProvider,
+    provider: providers.Provider,
+    model: []const u8,
+    temperature: f64,
     envelope_json: []const u8,
 ) !Verdict {
-    var holder = triageProviderHolder(allocator, provider);
-    defer holder.deinit();
-
-    const response_text = try holder.provider().chatWithSystem(
+    const response_text = try provider.chatWithSystem(
         allocator,
         SYSTEM_PROMPT,
         envelope_json,
-        provider.model,
-        provider.temperature,
+        model,
+        temperature,
     );
     defer allocator.free(response_text);
 
     const trimmed = std.mem.trim(u8, response_text, " \t\r\n");
     return parseVerdictJson(allocator, stripFences(trimmed));
-}
-
-fn triageProviderHolder(allocator: Allocator, provider: TriageProvider) providers.ProviderHolder {
-    return providers.ProviderHolder.fromConfig(
-        allocator,
-        provider.name,
-        provider.api_key,
-        null,
-        true,
-        null,
-        null,
-        false,
-        null,
-    );
 }
 
 fn stripFences(text: []const u8) []const u8 {
@@ -192,13 +169,60 @@ test "stripFences removes markdown code fence" {
     try std.testing.expect(std.mem.endsWith(u8, stripped, "}"));
 }
 
-test "triage provider holder supports keyless local provider" {
-    var holder = triageProviderHolder(std.testing.allocator, .{
-        .name = "ollama",
-        .model = "llama3.2",
-        .api_key = null,
-    });
-    defer holder.deinit();
+test "triageEnvelope uses supplied provider interface" {
+    const TestProvider = struct {
+        called: bool = false,
 
-    try std.testing.expectEqualStrings("Ollama", holder.provider().getName());
+        fn chatWithSystem(
+            ptr: *anyopaque,
+            allocator: Allocator,
+            system_prompt: ?[]const u8,
+            message: []const u8,
+            model: []const u8,
+            temperature: f64,
+        ) ![]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.called = true;
+            try std.testing.expect(system_prompt != null);
+            try std.testing.expectEqualStrings("{}", message);
+            try std.testing.expectEqualStrings("triage-model", model);
+            try std.testing.expectEqual(@as(f64, 0.0), temperature);
+            return allocator.dupe(u8, "{\"decision\":\"false_positive\",\"severity_adjusted\":\"low\",\"reasoning\":\"test\",\"confidence_score\":0.9}");
+        }
+
+        fn chat(_: *anyopaque, _: Allocator, _: providers.ChatRequest, _: []const u8, _: f64) !providers.ChatResponse {
+            return error.NotSupported;
+        }
+
+        fn supportsNativeTools(_: *anyopaque) bool {
+            return false;
+        }
+
+        fn getName(_: *anyopaque) []const u8 {
+            return "test";
+        }
+
+        fn deinit(_: *anyopaque) void {}
+
+        const vtable = providers.Provider.VTable{
+            .chatWithSystem = chatWithSystem,
+            .chat = chat,
+            .supportsNativeTools = supportsNativeTools,
+            .getName = getName,
+            .deinit = deinit,
+        };
+    };
+
+    var test_provider = TestProvider{};
+    const provider = providers.Provider{
+        .ptr = &test_provider,
+        .vtable = &TestProvider.vtable,
+    };
+
+    var verdict = try triageEnvelope(std.testing.allocator, provider, "triage-model", 0.0, "{}");
+    defer verdict.deinit(std.testing.allocator);
+
+    try std.testing.expect(test_provider.called);
+    try std.testing.expectEqual(Decision.false_positive, verdict.decision);
+    try std.testing.expectEqualStrings("low", verdict.severity_adjusted);
 }

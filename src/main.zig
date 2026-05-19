@@ -3262,8 +3262,10 @@ fn runWorkspaceAudit(allocator: std.mem.Allocator, args: []const []const u8, cfg
     var options = yc.workspace_audit.Options{
         .workspace_dir = cfg.workspace_dir,
     };
-    var owned_triage_api_key: ?[]u8 = null;
-    defer if (owned_triage_api_key) |key| allocator.free(key);
+    var owned_provider_api_key: ?[]u8 = null;
+    defer if (owned_provider_api_key) |key| allocator.free(key);
+    var triage_provider_holder: ?yc.providers.ProviderHolder = null;
+    defer if (triage_provider_holder) |*holder| holder.deinit();
 
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -3357,14 +3359,22 @@ fn runWorkspaceAudit(allocator: std.mem.Allocator, args: []const []const u8, cfg
             std_compat.process.exit(1);
         }
         const provider_name = options.triage_provider.?;
-        owned_triage_api_key = resolveWorkspaceAuditTriageApiKey(allocator, &cfg, provider_name) catch |err| switch (err) {
+        owned_provider_api_key = resolveWorkspaceAuditTriageApiKey(allocator, &cfg, provider_name) catch |err| switch (err) {
             error.NoApiKey => {
                 std.debug.print("workspace audit: no api_key for provider '{s}'. Set providers.{s}.api_key, an environment key, or use a local/keyless provider.\n", .{ provider_name, provider_name });
                 std_compat.process.exit(1);
             },
             else => return err,
         };
-        options.triage_api_key = owned_triage_api_key;
+        triage_provider_holder = workspaceAuditTriageProviderHolder(
+            allocator,
+            &cfg,
+            provider_name,
+            owned_provider_api_key,
+        );
+        if (triage_provider_holder) |*holder| {
+            options.triage_provider_client = holder.provider();
+        }
     }
 
     var git_modes: usize = 0;
@@ -3404,6 +3414,26 @@ fn resolveWorkspaceAuditTriageApiKey(
         return (try yc.providers.resolveApiKey(allocator, provider_name, null)) orelse error.NoApiKey;
     }
     return null;
+}
+
+fn workspaceAuditTriageProviderHolder(
+    allocator: std.mem.Allocator,
+    cfg: *const yc.config.Config,
+    provider_name: []const u8,
+    api_key: ?[]const u8,
+) yc.providers.ProviderHolder {
+    return yc.providers.ProviderHolder.fromConfigWithApiMode(
+        allocator,
+        provider_name,
+        api_key,
+        cfg.getProviderBaseUrl(provider_name),
+        cfg.getProviderNativeTools(provider_name),
+        cfg.getProviderUserAgent(provider_name),
+        cfg.getProviderApiMode(provider_name),
+        cfg.getProviderMaxStreamingPromptBytes(provider_name),
+        cfg.getProviderChatTemplateEnableThinkingParam(provider_name),
+        cfg.getProviderExtraBodyParams(provider_name),
+    );
 }
 
 fn getEnvVarOwnedOrNull(allocator: std.mem.Allocator, name: []const u8) ?[]u8 {
@@ -5379,6 +5409,42 @@ test "resolveWorkspaceAuditTriageApiKey allows keyless local provider" {
 
     const key = try resolveWorkspaceAuditTriageApiKey(allocator, &cfg, "ollama");
     try std.testing.expect(key == null);
+}
+
+test "workspace audit triage provider holder uses full provider config" {
+    const allocator = std.testing.allocator;
+    const providers_cfg = [_]yc.config.ProviderEntry{.{
+        .name = "custom-local",
+        .base_url = "http://localhost:4321/v1",
+        .native_tools = false,
+        .user_agent = "nullclaw-test",
+        .api_mode = .responses,
+        .chat_template_enable_thinking_param = true,
+        .max_streaming_prompt_bytes = 123,
+        .extra_body_params = "{\"seed\":1}",
+    }};
+    const cfg = yc.config.Config{
+        .workspace_dir = "/tmp/nullclaw-test",
+        .config_path = "/tmp/nullclaw-test/config.json",
+        .allocator = allocator,
+        .providers = &providers_cfg,
+    };
+
+    var holder = workspaceAuditTriageProviderHolder(allocator, &cfg, "custom-local", null);
+    defer holder.deinit();
+
+    switch (holder) {
+        .compatible => |*provider| {
+            try std.testing.expectEqualStrings("http://localhost:4321/v1", provider.base_url);
+            try std.testing.expect(!provider.native_tools);
+            try std.testing.expectEqualStrings("nullclaw-test", provider.user_agent.?);
+            try std.testing.expectEqual(yc.providers.compatible.CompatibleApiMode.responses, provider.api_mode);
+            try std.testing.expect(provider.chat_template_enable_thinking_param);
+            try std.testing.expectEqual(@as(?usize, 123), provider.max_streaming_prompt_bytes);
+            try std.testing.expectEqualStrings("{\"seed\":1}", provider.extra_body_params.?);
+        },
+        else => return error.TestUnexpectedResult,
+    }
 }
 
 test "configureWindowsConsoleUtf8 is safe to call" {

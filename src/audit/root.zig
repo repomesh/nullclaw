@@ -2,7 +2,7 @@
 //!
 //! Sub-modules:
 //!   envelope.zig    — privacy-safe metadata envelopes for findings
-//!   llm_client.zig  — provider-agnostic envelope triage call
+//!   llm_client.zig  — provider-vtable envelope triage prompt/parser
 //!   audit_log.zig   — append-only log of LLM-triage requests
 //!   triager.zig     — orchestration: envelope → LLM → log → verdict
 

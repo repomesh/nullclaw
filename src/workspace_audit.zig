@@ -7,6 +7,7 @@ const scrub = @import("providers/scrub.zig");
 const util = @import("util.zig");
 const process_util = @import("tools/process_util.zig");
 const audit = @import("audit/root.zig");
+const providers = @import("providers/root.zig");
 
 const Allocator = std.mem.Allocator;
 
@@ -163,7 +164,8 @@ pub const Options = struct {
     triage_mode: TriageMode = .off,
     triage_provider: ?[]const u8 = null,
     triage_model: ?[]const u8 = null,
-    triage_api_key: ?[]const u8 = null,
+    triage_provider_client: ?providers.Provider = null,
+    triage_temperature: f64 = 0.0,
     audit_log_path: ?[]const u8 = null,
 };
 

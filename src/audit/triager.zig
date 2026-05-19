@@ -94,11 +94,20 @@ pub fn runTriage(
             finding.* = makeEmptyFinding();
             continue;
         };
-        var verdict = llm_client.triageEnvelope(allocator, .{
-            .name = provider_name,
-            .model = model_name,
-            .api_key = options.triage_api_key,
-        }, env_json) catch |err| {
+        const provider_client = options.triage_provider_client orelse {
+            stats.errors += 1;
+            std.debug.print("triage: missing provider client for '{s}'\n", .{provider_name});
+            try kept.append(allocator, finding.*);
+            finding.* = makeEmptyFinding();
+            continue;
+        };
+        var verdict = llm_client.triageEnvelope(
+            allocator,
+            provider_client,
+            model_name,
+            options.triage_temperature,
+            env_json,
+        ) catch |err| {
             stats.errors += 1;
             std.debug.print("triage: llm call failed for {s}:{?d}: {s}\n", .{
                 finding.path,
