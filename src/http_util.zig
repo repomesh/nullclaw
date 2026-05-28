@@ -1,13 +1,15 @@
-//! Shared HTTP utilities via curl subprocess.
+//! Shared HTTP utilities.
 //!
-//! Replaces 9+ local `curlPost` / `curlGet` duplicates across the codebase.
-//! Uses curl to keep timeout handling explicit and avoid std.http regressions.
+//! Keeps legacy curl helpers for non-secret requests, but routes credentialed
+//! headers and sensitive token URLs through std.http so secrets are not exposed
+//! through child process argv.
 
 const std = @import("std");
 const std_compat = @import("compat");
 const Allocator = std.mem.Allocator;
 const AtomicBool = std.atomic.Value(bool);
 const net_security = @import("net_security.zig");
+const platform = @import("platform.zig");
 
 const log = std.log.scoped(.http_util);
 threadlocal var thread_interrupt_flag: ?*const AtomicBool = null;
@@ -169,6 +171,14 @@ fn isCredentialHeader(header: []const u8) bool {
         std.ascii.eqlIgnoreCase(name, "cookie");
 }
 
+fn hasCredentialedCurlArgs(url: []const u8, headers: []const []const u8) bool {
+    if (hasSensitiveUrlToken(url)) return true;
+    for (headers) |header| {
+        if (isCredentialHeader(header)) return true;
+    }
+    return false;
+}
+
 fn hasSensitiveUrlToken(url: []const u8) bool {
     const query_start = std.mem.indexOfScalar(u8, url, '?') orelse return false;
     var query = url[query_start + 1 ..];
@@ -199,12 +209,83 @@ pub fn validateNoCredentialedCurlArgs(url: []const u8, headers: []const []const 
     }
 }
 
+pub const CurlHeaderArg = struct {
+    arg: ?[]const u8 = null,
+    temp_path_buf: [std_compat.fs.max_path_bytes]u8 = undefined,
+    temp_path_len: usize = 0,
+    uses_temp_file: bool = false,
+
+    pub fn deinit(self: *const CurlHeaderArg, allocator: Allocator) void {
+        if (!self.uses_temp_file) return;
+        std_compat.fs.deleteFileAbsolute(self.temp_path_buf[0..self.temp_path_len]) catch {};
+        if (self.arg) |arg| allocator.free(arg);
+    }
+};
+
+fn validateCurlHeaderLine(header: []const u8) !void {
+    if (std.mem.indexOfAny(u8, header, "\r\n") != null) return error.InvalidHeader;
+}
+
+pub fn prepareCurlHeaderArg(allocator: Allocator, headers: []const []const u8) !CurlHeaderArg {
+    if (headers.len == 0) return .{};
+
+    var prepared: CurlHeaderArg = .{};
+    const tmp_dir_path = platform.getTempDir(allocator) catch return error.TempDirNotFound;
+    defer allocator.free(tmp_dir_path);
+
+    var tmp_dir = std_compat.fs.openDirAbsolute(tmp_dir_path, .{}) catch return error.TempDirNotFound;
+    defer tmp_dir.close();
+
+    const header_path = std.fmt.bufPrint(
+        &prepared.temp_path_buf,
+        "{s}{s}curl_headers_{d}.tmp",
+        .{ tmp_dir_path, std_compat.fs.path.sep_str, std_compat.time.nanoTimestamp() },
+    ) catch return error.PathTooLong;
+    prepared.temp_path_len = header_path.len;
+    errdefer std_compat.fs.deleteFileAbsolute(prepared.temp_path_buf[0..prepared.temp_path_len]) catch {};
+
+    var tmp_file = tmp_dir.createFile(
+        header_path[tmp_dir_path.len + 1 ..],
+        .{ .truncate = true, .exclusive = false, .permissions = std_compat.fs.permissionsFromMode(0o600) },
+    ) catch return error.TempFileCreateFailed;
+
+    for (headers) |header| {
+        validateCurlHeaderLine(header) catch {
+            tmp_file.close();
+            return error.InvalidHeader;
+        };
+        tmp_file.writeAll(header) catch {
+            tmp_file.close();
+            return error.TempFileWriteFailed;
+        };
+        tmp_file.writeAll("\n") catch {
+            tmp_file.close();
+            return error.TempFileWriteFailed;
+        };
+    }
+    tmp_file.close();
+
+    for (prepared.temp_path_buf[0..prepared.temp_path_len]) |*c| {
+        if (c.* == '\\') c.* = '/';
+    }
+
+    prepared.arg = try std.fmt.allocPrint(allocator, "@{s}", .{prepared.temp_path_buf[0..prepared.temp_path_len]});
+    prepared.uses_temp_file = true;
+    return prepared;
+}
+
 fn parseHeader(header: []const u8) ?std.http.Header {
     const colon = std.mem.indexOfScalar(u8, header, ':') orelse return null;
     const name = std.mem.trim(u8, header[0..colon], " \t\r\n");
     const value = std.mem.trim(u8, header[colon + 1 ..], " \t\r\n");
     if (name.len == 0) return null;
     return .{ .name = name, .value = value };
+}
+
+fn contentTypeHeaderValue(header: []const u8) ?[]const u8 {
+    const parsed = parseHeader(header) orelse return null;
+    if (!std.ascii.eqlIgnoreCase(parsed.name, "content-type")) return null;
+    return parsed.value;
 }
 
 fn initProxyClientWithOptionalProxy(allocator: Allocator, proxy: ?[]const u8) !ProxyHttpClient {
@@ -225,7 +306,7 @@ fn initProxyClientWithOptionalProxy(allocator: Allocator, proxy: ?[]const u8) !P
     return .{ .proxy_arena = proxy_arena, .client = client };
 }
 
-pub fn httpRequest(
+pub fn httpRequestWithStatusAndHeaders(
     allocator: Allocator,
     method: std.http.Method,
     url: []const u8,
@@ -233,7 +314,7 @@ pub fn httpRequest(
     headers: []const []const u8,
     content_type: ?[]const u8,
     proxy: ?[]const u8,
-) ![]u8 {
+) !HttpResponseWithHeaders {
     var header_buf: [20]std.http.Header = undefined;
     var header_count: usize = 0;
     if (content_type) |ct| {
@@ -249,19 +330,88 @@ pub fn httpRequest(
     var client = try initProxyClientWithOptionalProxy(allocator, proxy);
     defer client.deinit();
 
+    const uri = try std.Uri.parse(url);
+    const redirect_behavior: std.http.Client.Request.RedirectBehavior =
+        if (body == null) @enumFromInt(3) else .unhandled;
+    var req = try client.client.request(method, uri, .{
+        .redirect_behavior = redirect_behavior,
+        .headers = .{ .accept_encoding = .default },
+        .extra_headers = header_buf[0..header_count],
+    });
+    defer req.deinit();
+
+    if (body) |payload| {
+        req.transfer_encoding = .{ .content_length = payload.len };
+        var request_body = try req.sendBodyUnflushed(&.{});
+        try request_body.writer.writeAll(payload);
+        try request_body.end();
+        try req.connection.?.flush();
+    } else {
+        try req.sendBodiless();
+    }
+
+    var redirect_buffer: [8 * 1024]u8 = undefined;
+    var response = try req.receiveHead(&redirect_buffer);
+    const response_headers = try allocator.dupe(u8, response.head.bytes);
+    errdefer allocator.free(response_headers);
+
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
 
-    const result = try client.client.fetch(.{
-        .location = .{ .url = url },
-        .method = method,
-        .payload = body,
-        .extra_headers = header_buf[0..header_count],
-        .response_writer = &aw.writer,
-    });
-    if (@intFromEnum(result.status) < 200 or @intFromEnum(result.status) >= 300) return error.HttpStatusError;
-    const response = aw.writer.buffer[0..aw.writer.end];
-    return try allocator.dupe(u8, response);
+    const decompress_buffer: []u8 = switch (response.head.content_encoding) {
+        .identity => &.{},
+        .zstd => try allocator.alloc(u8, std.compress.zstd.default_window_len),
+        .deflate, .gzip => try allocator.alloc(u8, std.compress.flate.max_window_len),
+        .compress => return error.UnsupportedCompressionMethod,
+    };
+    defer if (response.head.content_encoding != .identity) allocator.free(decompress_buffer);
+
+    var transfer_buffer: [64]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    const reader = response.readerDecompressing(&transfer_buffer, &decompress, decompress_buffer);
+    _ = reader.streamRemaining(&aw.writer) catch |err| switch (err) {
+        error.ReadFailed => return response.bodyErr().?,
+        else => |e| return e,
+    };
+
+    const response_body = aw.writer.buffer[0..aw.writer.end];
+    return .{
+        .status_code = @as(u16, @intFromEnum(response.head.status)),
+        .headers = response_headers,
+        .body = try allocator.dupe(u8, response_body),
+    };
+}
+
+pub fn httpRequestWithStatus(
+    allocator: Allocator,
+    method: std.http.Method,
+    url: []const u8,
+    body: ?[]const u8,
+    headers: []const []const u8,
+    content_type: ?[]const u8,
+    proxy: ?[]const u8,
+) !HttpResponse {
+    const resp = try httpRequestWithStatusAndHeaders(allocator, method, url, body, headers, content_type, proxy);
+    allocator.free(resp.headers);
+    return .{
+        .status_code = resp.status_code,
+        .body = resp.body,
+    };
+}
+
+pub fn httpRequest(
+    allocator: Allocator,
+    method: std.http.Method,
+    url: []const u8,
+    body: ?[]const u8,
+    headers: []const []const u8,
+    content_type: ?[]const u8,
+    proxy: ?[]const u8,
+) ![]u8 {
+    const resp = try httpRequestWithStatus(allocator, method, url, body, headers, content_type, proxy);
+    errdefer allocator.free(resp.body);
+    if (resp.status_code < 200 or resp.status_code >= 300) return error.HttpStatusError;
+    return resp.body;
 }
 
 pub fn httpPostJsonWithProxy(
@@ -495,6 +645,13 @@ fn curlRequestWithProxy(
     max_time: ?[]const u8,
     resolve_entry: ?[]const u8,
 ) ![]u8 {
+    if (hasCredentialedCurlArgs(url, headers)) {
+        const method_enum = std.meta.stringToEnum(std.http.Method, method) orelse return error.UnsupportedHttpMethod;
+        const content_type = contentTypeHeaderValue(content_type_header) orelse return error.InvalidHeader;
+        const resp = try httpRequestWithStatus(allocator, method_enum, url, body, headers, content_type, proxy);
+        return resp.body;
+    }
+
     try validateNoCredentialedCurlArgs(url, headers);
     var argv_buf: [40][]const u8 = undefined;
     var argc: usize = 0;
@@ -665,6 +822,10 @@ pub fn curlPostWithStatusAndTimeoutAndResolve(
     max_time: ?[]const u8,
     resolve_entry: ?[]const u8,
 ) !HttpResponse {
+    if (hasCredentialedCurlArgs(url, headers)) {
+        return httpRequestWithStatus(allocator, .POST, url, body, headers, "application/json", null);
+    }
+
     try validateNoCredentialedCurlArgs(url, headers);
     var argv_buf: [48][]const u8 = undefined;
     var argc: usize = 0;
@@ -806,6 +967,10 @@ pub fn curlPostWithStatusHeadersAndTimeoutAndResolve(
     max_time: ?[]const u8,
     resolve_entry: ?[]const u8,
 ) !HttpResponseWithHeaders {
+    if (hasCredentialedCurlArgs(url, headers)) {
+        return httpRequestWithStatusAndHeaders(allocator, .POST, url, body, headers, "application/json", null);
+    }
+
     try validateNoCredentialedCurlArgs(url, headers);
     var argv_buf: [56][]const u8 = undefined;
     var argc: usize = 0;
@@ -967,6 +1132,10 @@ pub fn curlGetWithStatusAndTimeoutAndResolve(
     max_time: ?[]const u8,
     resolve_entry: ?[]const u8,
 ) !HttpResponse {
+    if (hasCredentialedCurlArgs(url, headers)) {
+        return httpRequestWithStatus(allocator, .GET, url, null, headers, null, null);
+    }
+
     try validateNoCredentialedCurlArgs(url, headers);
     var argv_buf: [48][]const u8 = undefined;
     var argc: usize = 0;
@@ -1085,6 +1254,10 @@ fn curlGetWithProxyAndResolve(
     resolve_entry: ?[]const u8,
     max_bytes: usize,
 ) ![]u8 {
+    if (hasCredentialedCurlArgs(url, headers)) {
+        return httpRequest(allocator, .GET, url, null, headers, null, proxy);
+    }
+
     try validateNoCredentialedCurlArgs(url, headers);
     var argv_buf: [48][]const u8 = undefined;
     var argc: usize = 0;
@@ -1475,6 +1648,35 @@ test "credentialed curl argv validation rejects token query" {
     try std.testing.expectError(
         error.CredentialedCurlArgRejected,
         validateNoCredentialedCurlArgs("https://example.com/v1?access_token=test-token", &.{}),
+    );
+}
+
+test "credentialed curl args route to std http fallback" {
+    try std.testing.expect(hasCredentialedCurlArgs("https://example.com/v1", &.{"Authorization: Bearer test-token"}));
+    try std.testing.expect(hasCredentialedCurlArgs("https://example.com/v1?access_token=test-token", &.{}));
+    try std.testing.expect(!hasCredentialedCurlArgs("https://example.com/v1", &.{"User-Agent: nullclaw-test"}));
+}
+
+test "prepareCurlHeaderArg writes headers outside argv" {
+    var prepared = try prepareCurlHeaderArg(std.testing.allocator, &.{ "Authorization: Bearer test-token", "X-Test: ok" });
+    defer prepared.deinit(std.testing.allocator);
+
+    // Regression: direct curl callers can keep credential headers out of argv.
+    try std.testing.expect(prepared.uses_temp_file);
+    try std.testing.expect(prepared.arg != null);
+    try std.testing.expect(std.mem.startsWith(u8, prepared.arg.?, "@"));
+
+    const file = try std_compat.fs.openFileAbsolute(prepared.arg.?[1..], .{});
+    defer file.close();
+    const content = try file.readToEndAlloc(std.testing.allocator, 1024);
+    defer std.testing.allocator.free(content);
+    try std.testing.expectEqualStrings("Authorization: Bearer test-token\nX-Test: ok\n", content);
+}
+
+test "prepareCurlHeaderArg rejects newline injection" {
+    try std.testing.expectError(
+        error.InvalidHeader,
+        prepareCurlHeaderArg(std.testing.allocator, &.{"Authorization: Bearer test-token\nX-Injected: bad"}),
     );
 }
 

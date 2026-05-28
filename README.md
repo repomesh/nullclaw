@@ -180,17 +180,17 @@ make config CONFIG_ARGS="--api-key sk-... --provider openrouter"
 ```
 
 The compose gateway defaults to `NULLCLAW_PORT=3210`, binds inside the
-container on `0.0.0.0`, and publishes on all host interfaces:
+container on `0.0.0.0`, and publishes to localhost on the host:
 
 ```bash
 curl http://127.0.0.1:3210/health
-curl http://<host-ip>:3210/health
 ```
 
-Override the port when needed:
+Override the port or host bind address when needed:
 
 ```bash
 make up NULLCLAW_PORT=8080
+make up NULLCLAW_BIND=0.0.0.0
 ```
 
 Operational shortcuts:
@@ -201,9 +201,8 @@ make down
 make shell
 ```
 
-Because the compose gateway is published on `0.0.0.0`, keep pairing, webhook
-secrets, allowlists, and host firewall rules configured before using it on an
-untrusted network.
+Only set `NULLCLAW_BIND=0.0.0.0` on trusted networks with pairing, webhook
+secrets, allowlists, and host firewall rules configured.
 
 ### 4) Common commands
 

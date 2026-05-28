@@ -147,4 +147,3 @@ Before handing off or opening a PR, include:
 4. Validation commands and results.
 5. Remaining risks or unknowns.
 6. Next recommended action.
-

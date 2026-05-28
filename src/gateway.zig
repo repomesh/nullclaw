@@ -1954,6 +1954,11 @@ fn telegramWebhookSecretMatches(raw_request: []const u8, configured_secret: ?[]c
     return constantTimeEq(trimmed, secret);
 }
 
+fn lineSenderAllowed(allow_from: []const []const u8, evt: channels.line.LineEvent) bool {
+    const user_id = evt.user_id orelse return false;
+    return channels.isAllowed(allow_from, user_id);
+}
+
 fn telegramSessionKeyRouted(
     allocator: std.mem.Allocator,
     fallback_buf: []u8,
@@ -2640,48 +2645,45 @@ pub fn sendTelegramReply(
     message_thread_id: ?i64,
     text: []const u8,
 ) !void {
-    // Build the curl command to call the Telegram API
+    const body = try buildTelegramReplyBody(allocator, chat_id, message_thread_id, text);
+    defer allocator.free(body);
+
+    // Tests cover the JSON construction above; skip the real Telegram side effect.
+    if (comptime builtin.is_test) return;
+
     const url = try std.fmt.allocPrint(allocator, "https://api.telegram.org/bot{s}/sendMessage", .{bot_token});
     defer allocator.free(url);
 
-    // JSON-escape the text for the body
-    var body_buf: std.ArrayList(u8) = .empty;
-    defer body_buf.deinit(allocator);
-    var body_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &body_buf);
-    const w = &body_writer.writer;
-    try w.print("{{\"chat_id\":{d},\"text\":\"", .{chat_id});
-    for (text) |c| {
-        switch (c) {
-            '"' => try w.writeAll("\\\""),
-            '\\' => try w.writeAll("\\\\"),
-            '\n' => try w.writeAll("\\n"),
-            '\r' => try w.writeAll("\\r"),
-            '\t' => try w.writeAll("\\t"),
-            else => try w.writeByte(c),
-        }
-    }
-    try w.writeAll("\"");
+    const resp = http_util.httpRequest(allocator, .POST, url, body, &.{}, "application/json", null) catch return;
+    allocator.free(resp);
+}
+
+fn buildTelegramReplyBody(
+    allocator: std.mem.Allocator,
+    chat_id: i64,
+    message_thread_id: ?i64,
+    text: []const u8,
+) ![]u8 {
+    var body: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer body.deinit(allocator);
+
+    var int_buf: [32]u8 = undefined;
+    try body.appendSlice(allocator, "{\"chat_id\":");
+    try body.appendSlice(allocator, std.fmt.bufPrint(&int_buf, "{d}", .{chat_id}) catch "0");
+    try body.appendSlice(allocator, ",\"text\":");
+    try appendJsonStringBuf(&body, allocator, text);
     if (message_thread_id) |thread_id| {
-        try w.print(",\"message_thread_id\":{d}", .{thread_id});
+        try body.appendSlice(allocator, ",\"message_thread_id\":");
+        try body.appendSlice(allocator, std.fmt.bufPrint(&int_buf, "{d}", .{thread_id}) catch "0");
     }
-    try w.writeAll("}");
-    body_buf = body_writer.toArrayList();
+    try body.appendSlice(allocator, "}");
+    return body.toOwnedSlice(allocator);
+}
 
-    const body = body_buf.items;
-
-    var curl_child = std_compat.process.Child.init(
-        &[_][]const u8{
-            "curl", "-s",                             "-X", "POST",
-            "-H",   "Content-Type: application/json", "-d", body,
-            url,
-        },
-        allocator,
-    );
-    curl_child.stdout_behavior = .Pipe;
-    curl_child.stderr_behavior = .Pipe;
-
-    curl_child.spawn() catch return;
-    _ = curl_child.wait() catch {};
+test "telegram reply body escapes text and includes thread" {
+    const body = try buildTelegramReplyBody(std.testing.allocator, 42, 7, "hello \"there\"\nnext");
+    defer std.testing.allocator.free(body);
+    try std.testing.expectEqualStrings("{\"chat_id\":42,\"text\":\"hello \\\"there\\\"\\nnext\",\"message_thread_id\":7}", body);
 }
 
 fn userFacingAgentError(err: anyerror) []const u8 {
@@ -4079,11 +4081,7 @@ fn handleLineWebhookRoute(ctx: *WebhookHandlerContext) void {
             return;
         };
         for (events) |evt| {
-            if (line_allow_from.len > 0) {
-                if (evt.user_id) |uid| {
-                    if (!channels.isAllowed(line_allow_from, uid)) continue;
-                } else continue;
-            }
+            if (!lineSenderAllowed(line_allow_from, evt)) continue;
             if (evt.message_text) |text| {
                 var kb: [128]u8 = undefined;
                 const line_cfg_opt: ?*const Config = if (ctx.config_opt) |cfg| cfg else null;
@@ -5482,6 +5480,7 @@ pub fn run(
             state.telegram_bot_token = tg_cfg.bot_token;
             state.telegram_allow_from = tg_cfg.allow_from;
             state.telegram_account_id = tg_cfg.account_id;
+            state.telegram_webhook_secret = tg_cfg.webhook_secret;
         }
         if (cfg.channels.whatsappPrimary()) |wa_cfg| {
             state.whatsapp_verify_token = wa_cfg.verify_token;
@@ -7875,6 +7874,17 @@ test "telegramWebhookSecretMatches requires configured secret header" {
     try std.testing.expect(telegramWebhookSecretMatches(raw, "test-secret"));
     try std.testing.expect(!telegramWebhookSecretMatches(raw, "wrong-secret"));
     try std.testing.expect(!telegramWebhookSecretMatches(raw, null));
+}
+
+test "lineSenderAllowed denies empty allow_from and permits wildcard" {
+    const evt = channels.line.LineEvent{
+        .event_type = "message",
+        .user_id = "U123",
+    };
+    try std.testing.expect(!lineSenderAllowed(&.{}, evt));
+    try std.testing.expect(lineSenderAllowed(&.{"*"}, evt));
+    try std.testing.expect(lineSenderAllowed(&.{"U123"}, evt));
+    try std.testing.expect(!lineSenderAllowed(&.{"U999"}, evt));
 }
 
 test "telegramChatId extracts nested message.chat.id" {

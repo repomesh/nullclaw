@@ -13,7 +13,6 @@ services:
     command: ["sh", "-lc", "mkdir -p /nullclaw-data/workspace && chown -R ${NULLCLAW_UID:-65534}:${NULLCLAW_GID:-65534} /nullclaw-data"]
     volumes:
       - nullclaw-data:/nullclaw-data
-      - ./config.json:/nullclaw-data/config.json
       - ./workspace:/nullclaw-data/workspace
     restart: "no"
 
@@ -22,8 +21,6 @@ services:
     build: *nullclaw-build
     profiles: ["agent"]
     user: "${NULLCLAW_UID:-65534}:${NULLCLAW_GID:-65534}"
-    group_add:
-      - "111"
     depends_on:
       init-data:
         condition: service_completed_successfully
@@ -35,9 +32,7 @@ services:
         required: false
     volumes:
       - nullclaw-data:/nullclaw-data
-      - ./config.json:/nullclaw-data/config.json
       - ./workspace:/nullclaw-data/workspace
-      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
   gateway:
@@ -45,22 +40,18 @@ services:
     build: *nullclaw-build
     profiles: ["gateway"]
     user: "${NULLCLAW_UID:-65534}:${NULLCLAW_GID:-65534}"
-    group_add:
-      - "111"
     depends_on:
       init-data:
         condition: service_completed_successfully
     command: ["gateway", "--port", "${NULLCLAW_PORT:-3210}", "--host", "0.0.0.0"]
     ports:
-      - "0.0.0.0:${NULLCLAW_PORT:-3210}:${NULLCLAW_PORT:-3210}"
+      - "${NULLCLAW_BIND:-127.0.0.1}:${NULLCLAW_PORT:-3210}:${NULLCLAW_PORT:-3210}"
     env_file:
       - path: .env
         required: false
     volumes:
       - nullclaw-data:/nullclaw-data
-      - ./config.json:/nullclaw-data/config.json
       - ./workspace:/nullclaw-data/workspace
-      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:${NULLCLAW_PORT:-3210}/health"]
