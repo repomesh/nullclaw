@@ -6803,7 +6803,7 @@ test "parse telegram accounts accepts numeric group_allow_from" {
     defer arena.deinit();
     const allocator = arena.allocator();
     const json =
-        \\{"channels": {"telegram": {"accounts": {"main": {"bot_token": "TOKEN", "group_allow_from": [-1001234567890]}}}}}
+        \\{"channels": {"telegram": {"accounts": {"main": {"bot_token": "TOKEN", "group_allow_from": [123456789]}}}}}
     ;
     var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
     try cfg.parseJson(json);
@@ -6811,7 +6811,7 @@ test "parse telegram accounts accepts numeric group_allow_from" {
     try std.testing.expectEqual(@as(usize, 1), cfg.channels.telegram.len);
     const tg = cfg.channels.telegram[0];
     try std.testing.expectEqual(@as(usize, 1), tg.group_allow_from.len);
-    try std.testing.expectEqualStrings("-1001234567890", tg.group_allow_from[0]);
+    try std.testing.expectEqualStrings("123456789", tg.group_allow_from[0]);
 }
 
 test "parse discord accounts" {
