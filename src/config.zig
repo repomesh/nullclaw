@@ -6743,6 +6743,77 @@ test "parse telegram accounts keeps single custom account id" {
     allocator.free(cfg.channels.telegram);
 }
 
+// Regression test for #869 and #901: when `allow_from` carries Telegram numeric
+// user IDs (the way Telegram itself returns them), the whole channel account was
+// silently dropped — `parseTypedValue` got `error.UnexpectedToken` from the JSON
+// reflector, the surrounding `parseMultiAccountChannel` loop swallowed it via
+// `orelse continue`, the resulting `telegram` slice stayed empty, and the runtime
+// reported "Telegram: not configured" despite the JSON being present.
+//
+// Fix: accept integer items in `[]const []const u8` allow-lists and stringify
+// them. Two real configs from the issue reports:
+//   1) `"allow_from": [123456789]`           — single numeric id
+//   2) `"allow_from": ["alice", 123456789]`  — mixed string + int
+test "parse telegram accounts accepts numeric allow_from (regression #869, #901)" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"channels": {"telegram": {"accounts": {"main": {"bot_token": "TOKEN", "allow_from": [123456789]}}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+
+    // Pre-fix behaviour: telegram.len == 0 (whole account silently dropped).
+    try std.testing.expectEqual(@as(usize, 1), cfg.channels.telegram.len);
+    const tg = cfg.channels.telegram[0];
+    try std.testing.expectEqualStrings("main", tg.account_id);
+    try std.testing.expectEqualStrings("TOKEN", tg.bot_token);
+    try std.testing.expectEqual(@as(usize, 1), tg.allow_from.len);
+    try std.testing.expectEqualStrings("123456789", tg.allow_from[0]);
+
+    for (tg.allow_from) |u| allocator.free(u);
+    allocator.free(tg.allow_from);
+    allocator.free(tg.account_id);
+    allocator.free(tg.bot_token);
+    allocator.free(cfg.channels.telegram);
+}
+
+test "parse telegram accounts accepts mixed string + integer allow_from" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{"channels": {"telegram": {"accounts": {"main": {"bot_token": "TOKEN", "allow_from": ["alice", 12345]}}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.channels.telegram.len);
+    const tg = cfg.channels.telegram[0];
+    try std.testing.expectEqual(@as(usize, 2), tg.allow_from.len);
+    try std.testing.expectEqualStrings("alice", tg.allow_from[0]);
+    try std.testing.expectEqualStrings("12345", tg.allow_from[1]);
+
+    for (tg.allow_from) |u| allocator.free(u);
+    allocator.free(tg.allow_from);
+    allocator.free(tg.account_id);
+    allocator.free(tg.bot_token);
+    allocator.free(cfg.channels.telegram);
+}
+
+test "parse telegram accounts accepts numeric group_allow_from" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const json =
+        \\{"channels": {"telegram": {"accounts": {"main": {"bot_token": "TOKEN", "group_allow_from": [123456789]}}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.channels.telegram.len);
+    const tg = cfg.channels.telegram[0];
+    try std.testing.expectEqual(@as(usize, 1), tg.group_allow_from.len);
+    try std.testing.expectEqualStrings("123456789", tg.group_allow_from[0]);
+}
+
 test "parse discord accounts" {
     const allocator = std.testing.allocator;
     const json =
@@ -7081,6 +7152,22 @@ test "parse onebot multi-account sorted alphabetically" {
     try std.testing.expectEqualStrings("ws://east.local:6700", cfg.channels.onebot[0].url);
     try std.testing.expectEqualStrings("/bot", cfg.channels.onebot[0].group_trigger_prefix.?);
     try std.testing.expectEqualStrings("west", cfg.channels.onebot[1].account_id);
+}
+
+test "parse onebot accounts accepts numeric allow_from" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const json =
+        \\{"channels": {"onebot": {"accounts": {"main": {"allow_from": [123456789]}}}}}
+    ;
+    var cfg = Config{ .workspace_dir = "/tmp/yc", .config_path = "/tmp/yc/config.json", .allocator = allocator };
+    try cfg.parseJson(json);
+
+    try std.testing.expectEqual(@as(usize, 1), cfg.channels.onebot.len);
+    try std.testing.expectEqualStrings("main", cfg.channels.onebot[0].account_id);
+    try std.testing.expectEqual(@as(usize, 1), cfg.channels.onebot[0].allow_from.len);
+    try std.testing.expectEqualStrings("123456789", cfg.channels.onebot[0].allow_from[0]);
 }
 
 test "parse onebot account_id in payload is overridden by account key" {
